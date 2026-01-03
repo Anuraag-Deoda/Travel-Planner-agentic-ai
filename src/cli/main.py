@@ -113,9 +113,16 @@ async def _run_planning(request: str, verbose: bool) -> dict:
         for q in questions:
             q_id = q.get("question_id", "unknown")
             q_text = q.get("question_text", "")
+            q_type = q.get("question_type", "")
             options = q.get("options", [])
 
-            if options:
+            # Special handling for travel dates
+            if q_type == "travel_dates" or q_id == "travel_dates":
+                console.print(f"[cyan]{q_text}[/cyan]")
+                console.print("[dim]Format: 'Jan 15-22, 2026' or describe like 'mid-January 2026'[/dim]")
+                console.print("[dim]You can also say 'flexible' or 'around mid-February'[/dim]")
+                answer = Prompt.ask("Your travel dates")
+            elif options:
                 # Show options as numbered list
                 console.print(f"[cyan]{q_text}[/cyan]")
                 for i, opt in enumerate(options, 1):

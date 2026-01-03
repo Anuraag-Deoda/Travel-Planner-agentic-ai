@@ -13,6 +13,7 @@ from src.graph.nodes import (
     geography_node,
     research_node,
     food_culture_node,
+    transport_scraper_node,
     transport_budget_node,
     critic_node,
     finalize_node,
@@ -26,15 +27,16 @@ def create_travel_graph(
     """Create the travel planner LangGraph workflow.
 
     The graph follows this flow:
-    0. Clarification: Ask user for missing info (origin, dietary, pace, etc.)
+    0. Clarification: Ask user for missing info (origin, dates, dietary, pace, etc.)
        - If answers needed: Pause and wait for user input
        - If ready: Proceed to planning
     1. Planner: Understand request, allocate cities/days
     2. Geography: Validate and optimize route
     3. Research: Browse for attractions
     4. Food/Culture: Get food recommendations
-    5. Transport/Budget: Calculate transport and budget
-    6. Critic: Validate the complete plan
+    5. Transport Scraper: Fetch real-time transport prices (flights, trains, buses)
+    6. Transport/Budget: Calculate transport and budget using scraped prices
+    7. Critic: Validate the complete plan
        - If issues found: Loop back to Planner with feedback
        - If approved: Finalize the itinerary
 
@@ -55,6 +57,7 @@ def create_travel_graph(
     workflow.add_node("geography", geography_node)
     workflow.add_node("research", research_node)
     workflow.add_node("food_culture", food_culture_node)
+    workflow.add_node("transport_scraper", transport_scraper_node)
     workflow.add_node("transport_budget", transport_budget_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("finalize", finalize_node)
@@ -79,7 +82,8 @@ def create_travel_graph(
     workflow.add_edge("planner", "geography")
     workflow.add_edge("geography", "research")
     workflow.add_edge("research", "food_culture")
-    workflow.add_edge("food_culture", "transport_budget")
+    workflow.add_edge("food_culture", "transport_scraper")
+    workflow.add_edge("transport_scraper", "transport_budget")
     workflow.add_edge("transport_budget", "critic")
 
     # Add conditional edge from critic

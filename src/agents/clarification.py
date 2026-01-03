@@ -15,46 +15,65 @@ Analyze the user's travel request and determine what additional information is n
 
 ## WHAT TO CHECK FOR:
 
-1. **Origin City** (question_id: "origin_city")
+1. **Travel Dates** (question_id: "travel_dates") - ASK THIS FIRST!
+   - ALWAYS ask for travel dates unless explicitly provided
+   - This is REQUIRED for getting accurate transport prices
+   - Accept specific dates: "January 15-22, 2026"
+   - Accept flexible dates: "mid-January", "around February", "sometime in spring"
+   - question_type: "travel_dates"
+
+2. **Origin City** (question_id: "origin_city")
    - If NOT mentioned: Ask where they're traveling from
    - This helps plan flights/trains to the destination
 
-2. **Specific Destinations** (question_id: "specific_destinations")
+3. **Specific Destinations** (question_id: "specific_destinations")
    - If user mentions only a state/country (e.g., "Rajasthan", "Japan"): Ask which specific cities
    - If specific cities ARE mentioned (e.g., "Tokyo and Kyoto"): DON'T ask
 
-3. **Places Already Visited** (question_id: "visited_places")
+4. **Places Already Visited** (question_id: "visited_places")
    - Ask if they've visited the destination before
    - Helps avoid recommending places they've already seen
 
-4. **Dietary Preferences** (question_id: "dietary")
+5. **Dietary Preferences** (question_id: "dietary")
    - Ask about food restrictions/preferences
    - Options: Vegetarian, Vegan, Non-vegetarian, Halal, Kosher, No restrictions
 
-5. **Travel Pace** (question_id: "travel_pace")
+6. **Travel Pace** (question_id: "travel_pace")
    - Ask about preferred pace
    - Options: Relaxed (fewer activities, more free time), Moderate (balanced), Fast-paced (packed itinerary)
 
 ## RULES:
+- ALWAYS ask travel_dates FIRST unless specific dates are in the request
 - Only ask questions for information NOT already in the request
-- Maximum 5 questions total
-- Mark required=True only for truly essential questions (origin_city, specific_destinations if needed)
+- Maximum 6 questions total
+- Mark required=True for travel_dates, origin_city, and specific_destinations (if needed)
 - For dietary and pace, include common options
-- If the request is very detailed and complete, set needs_clarification=False and ready_to_plan=True
+- If the request has dates AND is very detailed and complete, set needs_clarification=False and ready_to_plan=True
 
 ## EXAMPLES:
 
 Request: "Plan a 5-day trip to Rajasthan"
-- Missing: origin city, specific cities in Rajasthan, dietary, pace
-- Questions: origin_city, specific_destinations, dietary, travel_pace
+- Missing: travel dates (CRITICAL), origin city, specific cities in Rajasthan, dietary, pace
+- Questions: travel_dates (first!), origin_city, specific_destinations, dietary, travel_pace
 
 Request: "Plan a 7-day trip from Delhi to Mumbai and Goa, vegetarian food only"
 - Has: origin (Delhi), destinations (Mumbai, Goa), dietary (vegetarian)
-- Missing: pace, places visited
-- Questions: travel_pace, visited_places (optional)
+- Missing: travel dates, pace
+- Questions: travel_dates (first!), travel_pace
 
-Request: "5 days in Tokyo and Kyoto from New York, relaxed pace, no dietary restrictions"
-- Has everything essential
+Request: "Plan a trip to Tokyo from January 15-22, 2026"
+- Has: travel dates (Jan 15-22, 2026)
+- Missing: origin city, pace, dietary
+- Questions: origin_city, dietary, travel_pace
+
+Request: "5 days in Tokyo and Kyoto from New York, January 10-15 2026, relaxed pace"
+- Has: dates, origin, destinations, pace
+- Missing: dietary
+- Questions: dietary (optional)
+- Could set needs_clarification=False if dietary is not critical
+
+Request: "5 days in Tokyo and Kyoto from New York, Jan 10-15 2026, relaxed pace, vegetarian"
+- Has everything essential including dates
 - needs_clarification=False, ready_to_plan=True
 """
 

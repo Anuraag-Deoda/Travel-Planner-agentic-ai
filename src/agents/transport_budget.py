@@ -1,6 +1,6 @@
 """Transport/Budget Agent - Calculates transport options and budget breakdown."""
 
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -50,6 +50,14 @@ Always recommend:
 - Money-saving tips specific to the destination
 - Best booking platforms for the region
 - Timing tips (book in advance vs. on-the-spot)
+
+REAL-TIME PRICE DATA:
+When real prices are provided from scraped booking sites:
+- PRIORITIZE real prices over estimates - these are current market prices
+- Use the source (google_flights, rome2rio, redbus, trainman, etc.) to indicate price reliability
+- If cheaper alternative dates are available, include them in your recommendation
+- If prices vary significantly by operator, recommend the best value option
+- Always show both real price (if available) and your estimate for comparison
 """
 
 
@@ -84,6 +92,10 @@ class TransportBudgetAgent(BaseAgent):
         route_segments = state.get("route_segments", [])
         trip_summary = state.get("trip_summary", {})
         attractions = state.get("attractions", [])
+        scraped_transport_prices = state.get("scraped_transport_prices", [])
+        nearest_stations = state.get("nearest_stations", {})
+        travel_start_date = state.get("travel_start_date")
+        travel_end_date = state.get("travel_end_date")
 
         if not city_allocations:
             return {
@@ -134,19 +146,31 @@ ORIGIN TO DESTINATION (IMPORTANT - Include this as the first transport segment):
   * Departure timing suggestions
 """
 
+        # Build real-time prices section from scraped data
+        real_prices_section = self._build_real_prices_section(
+            scraped_transport_prices, nearest_stations
+        )
+
+        # Build travel dates section
+        dates_section = ""
+        if travel_start_date:
+            dates_section = f"\n- Travel dates: {travel_start_date}"
+            if travel_end_date:
+                dates_section += f" to {travel_end_date}"
+
         human_content = f"""Calculate transport options and budget for this trip:
 
 TRIP OVERVIEW:
 - Total days: {total_days}
 - Budget level: {budget_level}
-{f"- Origin city: {origin_city}" if origin_city else ""}
+{f"- Origin city: {origin_city}" if origin_city else ""}{dates_section}
 
 CITIES:
 {cities_info}
 {origin_section}
 INTER-CITY ROUTES:
 {routes_info}
-
+{real_prices_section}
 ATTRACTIONS:
 {attractions_summary}
 
@@ -156,6 +180,8 @@ Please provide:
 {"3." if origin_city else "2."} Local transport recommendations for each city
 {"4." if origin_city else "3."} Complete budget breakdown (include origin transport if applicable)
 {"5." if origin_city else "4."} Money-saving tips specific to these destinations
+
+NOTE: When real prices are provided above, USE THEM as primary cost reference. Include cheaper date alternatives if available.
 """
 
         structured_llm = self.get_structured_llm(TransportBudgetOutput)
@@ -177,7 +203,18 @@ Please provide:
                 option.from_location.lower() == origin_city.lower()
             )
 
-            transport_options.append({
+            # Find matching scraped prices for this segment
+            segment_scraped = self._find_scraped_prices_for_segment(
+                option.from_location,
+                option.to_location,
+                scraped_transport_prices,
+            )
+
+            # Get real price and cheaper dates if available
+            real_price_info = self._get_best_real_price(segment_scraped)
+            cheaper_dates = self._get_cheaper_dates(segment_scraped)
+
+            transport_option = {
                 "from_location": option.from_location,
                 "to_location": option.to_location,
                 "is_origin_transport": is_origin_transport,
@@ -197,7 +234,15 @@ Please provide:
                     for alt in option.options if alt != option.recommended
                 ],
                 "reason": option.recommendation_reason,
-            })
+            }
+
+            # Add real price info if available
+            if real_price_info:
+                transport_option["real_price"] = real_price_info
+            if cheaper_dates:
+                transport_option["cheaper_dates"] = cheaper_dates
+
+            transport_options.append(transport_option)
 
         # Convert local transport recommendations list to dict format
         local_transport_tips = {
@@ -223,3 +268,134 @@ Please provide:
             "transport_options": transport_options,
             "budget_breakdown": budget_breakdown,
         }
+
+    def _build_real_prices_section(
+        self,
+        scraped_prices: list[dict],
+        nearest_stations: dict,
+    ) -> str:
+        """Build the real-time prices section for the LLM prompt."""
+        if not scraped_prices:
+            return ""
+
+        lines = ["\nREAL-TIME PRICES (from booking sites):"]
+
+        # Group prices by route
+        routes: dict[str, list[dict]] = {}
+        for price in scraped_prices:
+            route_key = f"{price.get('from_location', '')} → {price.get('to_location', '')}"
+            if route_key not in routes:
+                routes[route_key] = []
+            routes[route_key].append(price)
+
+        for route, prices in routes.items():
+            lines.append(f"\n{route}:")
+            for p in prices[:5]:  # Limit to top 5 per route
+                mode = p.get("mode", "unknown")
+                price_usd = p.get("price_usd")
+                source = p.get("source", "")
+                operator = p.get("operator", "")
+                duration = p.get("duration")
+                departure = p.get("departure_time", "")
+
+                if price_usd:
+                    price_str = f"  - {mode.upper()}: ${price_usd:.0f}"
+                    if operator:
+                        price_str += f" ({operator})"
+                    if duration:
+                        price_str += f", {duration}"
+                    if departure:
+                        price_str += f", dep: {departure}"
+                    price_str += f" [via {source}]"
+                    lines.append(price_str)
+
+                # Add alternative dates if available
+                alt_dates = p.get("alternative_dates", [])
+                if alt_dates:
+                    cheaper = [d for d in alt_dates if d.get("price_usd", 999999) < (price_usd or 999999)]
+                    if cheaper:
+                        cheaper_str = ", ".join(
+                            f"{d.get('date')}: ${d.get('price_usd'):.0f}" for d in cheaper[:3]
+                        )
+                        lines.append(f"    ↳ Cheaper dates: {cheaper_str}")
+
+        # Add nearest station info
+        if nearest_stations:
+            lines.append("\nNEAREST STATIONS/AIRPORTS:")
+            for city, info in nearest_stations.items():
+                if info:
+                    airport = info.get("airport_name") or info.get("airport_code")
+                    train = info.get("train_station")
+                    if airport:
+                        dist = info.get("airport_distance_km")
+                        lines.append(f"  - {city}: Airport '{airport}'" + (f" ({dist}km away)" if dist else ""))
+                    if train:
+                        dist = info.get("train_station_distance_km")
+                        lines.append(f"  - {city}: Train station '{train}'" + (f" ({dist}km away)" if dist else ""))
+
+        return "\n".join(lines)
+
+    def _find_scraped_prices_for_segment(
+        self,
+        from_loc: str,
+        to_loc: str,
+        scraped_prices: list[dict],
+    ) -> list[dict]:
+        """Find scraped prices matching a transport segment."""
+        from_lower = from_loc.lower()
+        to_lower = to_loc.lower()
+
+        matching = []
+        for p in scraped_prices:
+            p_from = (p.get("from_location") or "").lower()
+            p_to = (p.get("to_location") or "").lower()
+
+            # Match either direction or partial city name match
+            if (from_lower in p_from or p_from in from_lower) and \
+               (to_lower in p_to or p_to in to_lower):
+                matching.append(p)
+
+        return matching
+
+    def _get_best_real_price(self, scraped_prices: list[dict]) -> Optional[dict]:
+        """Get the best real price from scraped data."""
+        if not scraped_prices:
+            return None
+
+        # Find lowest price with valid data
+        valid_prices = [p for p in scraped_prices if p.get("price_usd")]
+        if not valid_prices:
+            return None
+
+        best = min(valid_prices, key=lambda x: x.get("price_usd", float("inf")))
+
+        return {
+            "price_usd": best.get("price_usd"),
+            "source": best.get("source"),
+            "mode": best.get("mode"),
+            "operator": best.get("operator"),
+            "departure_time": best.get("departure_time"),
+            "duration": best.get("duration"),
+            "travel_date": best.get("travel_date"),
+        }
+
+    def _get_cheaper_dates(self, scraped_prices: list[dict]) -> list[dict]:
+        """Extract cheaper alternative dates from scraped data."""
+        all_alternatives = []
+
+        for p in scraped_prices:
+            base_price = p.get("price_usd", float("inf"))
+            alt_dates = p.get("alternative_dates", [])
+
+            for alt in alt_dates:
+                alt_price = alt.get("price_usd")
+                if alt_price and alt_price < base_price:
+                    all_alternatives.append({
+                        "date": alt.get("date"),
+                        "price_usd": alt_price,
+                        "savings_usd": base_price - alt_price,
+                    })
+
+        # Sort by price and return top 3
+        all_alternatives.sort(key=lambda x: x.get("price_usd", float("inf")))
+        return all_alternatives[:3]

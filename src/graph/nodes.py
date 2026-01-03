@@ -1,5 +1,7 @@
 """Node functions that wrap agent calls for the LangGraph workflow."""
 
+import re
+from datetime import datetime, date
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -12,6 +14,7 @@ from src.agents.research import ResearchAgent
 from src.agents.food_culture import FoodCultureAgent
 from src.agents.transport_budget import TransportBudgetAgent
 from src.agents.critic import CriticAgent
+from src.agents.transport_scraper import TransportScraperAgent
 
 
 # Agent instances (created once, reused across invocations)
@@ -22,6 +25,7 @@ _research_agent: ResearchAgent | None = None
 _food_culture_agent: FoodCultureAgent | None = None
 _transport_budget_agent: TransportBudgetAgent | None = None
 _critic_agent: CriticAgent | None = None
+_transport_scraper_agent: TransportScraperAgent | None = None
 
 
 def _get_clarification() -> ClarificationAgent:
@@ -80,6 +84,14 @@ def _get_critic() -> CriticAgent:
     return _critic_agent
 
 
+def _get_transport_scraper() -> TransportScraperAgent:
+    """Get or create the Transport Scraper agent instance."""
+    global _transport_scraper_agent
+    if _transport_scraper_agent is None:
+        _transport_scraper_agent = TransportScraperAgent()
+    return _transport_scraper_agent
+
+
 async def clarification_node(state: AgentState) -> dict[str, Any]:
     """Node function for the Clarification Agent.
 
@@ -104,6 +116,88 @@ async def clarification_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+def parse_travel_dates(date_answer: str) -> dict:
+    """Parse travel date answer into structured format.
+
+    Handles:
+    - Specific: "January 15-22, 2026", "2026-01-15 to 2026-01-22", "Jan 15-22 2026"
+    - Flexible: "mid-January", "around February", "sometime in spring"
+
+    Returns dict with start_date, end_date, flexibility, description.
+    """
+    result = {
+        "start_date": None,
+        "end_date": None,
+        "flexibility": "specific",
+        "description": date_answer,
+    }
+
+    if not date_answer:
+        return result
+
+    # Check for flexible date indicators
+    flexible_indicators = [
+        "around", "sometime", "mid-", "early", "late",
+        "flexible", "approximately", "about", "roughly"
+    ]
+
+    is_flexible = any(ind in date_answer.lower() for ind in flexible_indicators)
+
+    if is_flexible:
+        result["flexibility"] = "flexible_week"
+        return result
+
+    # Month name mapping
+    month_map = {
+        'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
+        'mar': 3, 'march': 3, 'apr': 4, 'april': 4,
+        'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+        'aug': 8, 'august': 8, 'sep': 9, 'september': 9,
+        'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
+        'dec': 12, 'december': 12
+    }
+
+    # Try to parse specific dates
+    # Pattern 1: "January 15-22, 2026" or "Jan 15-22 2026"
+    pattern1 = r"(\w+)\s+(\d{1,2})\s*[-–to]+\s*(\d{1,2}),?\s*(\d{4})"
+    match = re.search(pattern1, date_answer, re.IGNORECASE)
+    if match:
+        try:
+            month_str, start_day, end_day, year = match.groups()
+            month = month_map.get(month_str.lower(), 1)
+            result["start_date"] = date(int(year), month, int(start_day)).isoformat()
+            result["end_date"] = date(int(year), month, int(end_day)).isoformat()
+            return result
+        except (ValueError, KeyError):
+            pass
+
+    # Pattern 2: "2026-01-15 to 2026-01-22" (ISO format range)
+    pattern2 = r"(\d{4})-(\d{2})-(\d{2})\s*(?:to|-|–)\s*(\d{4})-(\d{2})-(\d{2})"
+    match = re.search(pattern2, date_answer)
+    if match:
+        try:
+            result["start_date"] = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+            result["end_date"] = f"{match.group(4)}-{match.group(5)}-{match.group(6)}"
+            return result
+        except (ValueError, IndexError):
+            pass
+
+    # Pattern 3: Single date with duration "January 15, 2026 for 7 days"
+    pattern3 = r"(\w+)\s+(\d{1,2}),?\s*(\d{4})"
+    match = re.search(pattern3, date_answer, re.IGNORECASE)
+    if match:
+        try:
+            month_str, day, year = match.groups()
+            month = month_map.get(month_str.lower(), 1)
+            result["start_date"] = date(int(year), month, int(day)).isoformat()
+            # End date will be calculated based on trip duration later
+            return result
+        except (ValueError, KeyError):
+            pass
+
+    return result
+
+
 async def process_answers_node(state: AgentState) -> dict[str, Any]:
     """Process clarification answers and enrich the user request.
 
@@ -122,6 +216,26 @@ async def process_answers_node(state: AgentState) -> dict[str, Any]:
     visited = answers.get("visited_places")
     destinations = answers.get("specific_destinations")
 
+    # Parse travel dates
+    travel_dates_answer = answers.get("travel_dates")
+    travel_start_date = None
+    travel_end_date = None
+    travel_date_flexibility = None
+    travel_date_description = None
+
+    if travel_dates_answer:
+        parsed_dates = parse_travel_dates(travel_dates_answer)
+        travel_start_date = parsed_dates.get("start_date")
+        travel_end_date = parsed_dates.get("end_date")
+        travel_date_flexibility = parsed_dates.get("flexibility")
+        travel_date_description = parsed_dates.get("description")
+
+        # Add to enriched request
+        if travel_start_date and travel_end_date:
+            enriched_parts.append(f"\nIMPORTANT - Travel dates: {travel_start_date} to {travel_end_date}")
+        elif travel_date_description:
+            enriched_parts.append(f"\nIMPORTANT - Travel timing: {travel_date_description} (flexible)")
+
     if origin_city:
         enriched_parts.append(f"\nIMPORTANT - Traveling from: {origin_city}")
     if destinations:
@@ -136,7 +250,7 @@ async def process_answers_node(state: AgentState) -> dict[str, Any]:
         enriched_parts.append(f"\nAlready visited (avoid these): {visited}")
 
     message = AIMessage(
-        content=f"[Process Answers] Enriched request with user preferences (destinations: {destinations})",
+        content=f"[Process Answers] Enriched request with user preferences (dates: {travel_dates_answer}, destinations: {destinations})",
         name="process_answers",
     )
 
@@ -156,6 +270,11 @@ async def process_answers_node(state: AgentState) -> dict[str, Any]:
         "travel_pace": travel_pace,
         "places_visited": [visited] if visited and isinstance(visited, str) else visited,
         "specific_destinations": destinations_list,
+        # Travel date fields
+        "travel_start_date": travel_start_date,
+        "travel_end_date": travel_end_date,
+        "travel_date_flexibility": travel_date_flexibility,
+        "travel_date_description": travel_date_description,
         "messages": [message],
     }
 
@@ -492,6 +611,28 @@ async def food_culture_node(state: AgentState) -> dict[str, Any]:
     message = AIMessage(
         content=f"[Food/Culture] Generated {food_count} food recommendations and {tips_count} cultural tips",
         name="food_culture",
+    )
+
+    return {
+        **result,
+        "messages": [message],
+    }
+
+
+async def transport_scraper_node(state: AgentState) -> dict[str, Any]:
+    """Node function for the Transport Scraper Agent.
+
+    Scrapes real transport prices before budget calculation.
+    """
+    agent = _get_transport_scraper()
+    result = await agent.run(state)
+
+    prices_count = len(result.get("scraped_transport_prices", []))
+    stations_count = len(result.get("nearest_stations", {}))
+
+    message = AIMessage(
+        content=f"[Transport Scraper] Found {prices_count} real prices, {stations_count} station lookups",
+        name="transport_scraper",
     )
 
     return {

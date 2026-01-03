@@ -1,7 +1,7 @@
 """Food/Culture Agent - Provides food recommendations and cultural tips."""
 
 import json
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -10,6 +10,25 @@ from src.config.constants import FOOD_CULTURE_TEMPERATURE
 from src.models.agent_outputs import FoodCultureOutput
 from src.models.itinerary import BudgetLevel
 from src.models.state import AgentState
+from src.tools.google_api import (
+    search_restaurants_places_api,
+    get_restaurant_details_places_api,
+)
+from src.tools.browser.restaurant_review_tools import (
+    scrape_zomato_restaurants,
+    scrape_swiggy_restaurants,
+)
+
+
+# India cities for Zomato/Swiggy integration
+INDIA_CITIES = {
+    "delhi", "mumbai", "bangalore", "bengaluru", "chennai", "kolkata",
+    "hyderabad", "pune", "jaipur", "udaipur", "jodhpur", "goa", "agra",
+    "varanasi", "lucknow", "kochi", "trivandrum", "mysore", "shimla",
+    "manali", "rishikesh", "haridwar", "amritsar", "chandigarh", "ahmedabad",
+    "surat", "indore", "bhopal", "nagpur", "aurangabad", "nashik", "coimbatore",
+    "madurai", "thiruvananthapuram", "cochin", "ooty", "munnar", "alleppey",
+}
 
 
 FOOD_CULTURE_SYSTEM_PROMPT = """You are an expert in local cuisine and cultural practices. Your job is to provide authentic food recommendations and cultural guidance for travelers.
@@ -43,6 +62,15 @@ When recommending restaurants:
 - Consider safety and hygiene
 - Note if reservation is recommended
 - Indicate price range clearly
+
+REAL REVIEW DATA:
+When real restaurant reviews are provided:
+- PRIORITIZE highly-rated restaurants (4.0+ stars) from the scraped data
+- Use the review_highlights to mention what diners love about each place
+- Include popular dishes mentioned in reviews as must_try_dishes
+- Show the rating and review count in your recommendations
+- If a restaurant has thousands of reviews, it's generally reliable
+- Use the scraped source (google_maps, zomato, swiggy) in your output
 """
 
 
@@ -98,6 +126,9 @@ class FoodCultureAgent(BaseAgent):
             if not city:
                 continue
 
+            # Scrape restaurant reviews for this city
+            scraped_reviews = await self._scrape_restaurant_reviews(city, country)
+
             result = await self._get_city_recommendations(
                 city=city,
                 country=country,
@@ -105,11 +136,17 @@ class FoodCultureAgent(BaseAgent):
                 budget_level=budget_level,
                 traveler_profile=traveler_profile,
                 dietary_preferences=dietary_preferences,
+                scraped_reviews=scraped_reviews,
             )
 
-            # Add food recommendations
+            # Add food recommendations with review data
             for meal in result.restaurant_recommendations:
-                all_food_recommendations.append({
+                # Try to match with scraped review data
+                review_data = self._find_matching_review(
+                    meal.restaurant_name, scraped_reviews
+                )
+
+                food_rec = {
                     "city": city,
                     "meal_type": meal.meal_type,
                     "restaurant_name": meal.restaurant_name,
@@ -119,7 +156,27 @@ class FoodCultureAgent(BaseAgent):
                     "address": meal.address,
                     "must_try_dishes": meal.must_try_dishes,
                     "dietary_notes": meal.dietary_notes,
-                })
+                }
+
+                # Add review data if available
+                if review_data:
+                    food_rec["rating"] = review_data.get("rating")
+                    food_rec["review_count"] = review_data.get("review_count")
+                    food_rec["review_source"] = review_data.get("source")
+                    food_rec["review_highlights"] = review_data.get("review_highlights", [])
+                    food_rec["popular_dishes_from_reviews"] = review_data.get("popular_dishes", [])
+                    food_rec["source_url"] = review_data.get("source_url")
+                    # Enhanced data from Google Places API
+                    food_rec["photo_urls"] = review_data.get("photo_urls", [])
+                    food_rec["google_maps_url"] = review_data.get("google_maps_url")
+                    food_rec["website"] = review_data.get("website")
+                    food_rec["phone"] = review_data.get("phone")
+                    food_rec["opening_hours"] = review_data.get("opening_hours", [])
+                else:
+                    food_rec["review_source"] = "llm_generated"
+                    food_rec["photo_urls"] = []
+
+                all_food_recommendations.append(food_rec)
 
             # Collect cultural tips (deduplicate later)
             all_cultural_tips.extend(result.cultural_dos)
@@ -152,6 +209,7 @@ class FoodCultureAgent(BaseAgent):
         budget_level: str,
         traveler_profile: str,
         dietary_preferences: list[str] | None = None,
+        scraped_reviews: list[dict] | None = None,
     ) -> FoodCultureOutput:
         """Get food and culture recommendations for a single city.
 
@@ -162,6 +220,7 @@ class FoodCultureAgent(BaseAgent):
             budget_level: Trip budget level.
             traveler_profile: Type of traveler.
             dietary_preferences: List of dietary restrictions/preferences.
+            scraped_reviews: List of scraped restaurant reviews.
 
         Returns:
             FoodCultureOutput with recommendations.
@@ -170,6 +229,9 @@ class FoodCultureAgent(BaseAgent):
         if dietary_preferences:
             dietary_info = f"- Dietary preferences: {', '.join(dietary_preferences)}"
 
+        # Build scraped reviews section
+        reviews_section = self._build_reviews_section(scraped_reviews)
+
         human_content = f"""Provide food and cultural recommendations for {city}, {country}.
 
 Trip details:
@@ -177,7 +239,7 @@ Trip details:
 - Budget level: {budget_level}
 - Traveler type: {traveler_profile}
 {dietary_info}
-
+{reviews_section}
 Please provide:
 1. 3-5 must-try local dishes
 2. Restaurant recommendations with SPECIFIC meal types:
@@ -191,6 +253,7 @@ Please provide:
 
 IMPORTANT: Each restaurant recommendation MUST have the correct meal_type set to exactly one of: "breakfast", "lunch", or "dinner".
 Focus on authentic local experiences appropriate for the budget level.
+When real review data is provided above, PRIORITIZE those highly-rated restaurants in your recommendations.
 """
 
         structured_llm = self.get_structured_llm(FoodCultureOutput)
@@ -206,3 +269,164 @@ Focus on authentic local experiences appropriate for the budget level.
         result.city = city
 
         return result
+
+    async def _scrape_restaurant_reviews(
+        self,
+        city: str,
+        country: str,
+    ) -> list[dict]:
+        """Get restaurant data from Google Places API and other sources.
+
+        Args:
+            city: City name.
+            country: Country name.
+
+        Returns:
+            List of restaurant data from all sources.
+        """
+        all_reviews = []
+        is_india = (
+            city.lower() in INDIA_CITIES or
+            country.lower() == "india"
+        )
+
+        # Use Google Places API (much more reliable and detailed than scraping)
+        try:
+            google_result = await search_restaurants_places_api.ainvoke({
+                "city": city,
+                "max_results": 20,
+            })
+            parsed = json.loads(google_result)
+            if not parsed.get("error"):
+                for r in parsed.get("restaurants", []):
+                    r["source"] = "google_places_api"
+                    all_reviews.append(r)
+        except Exception:
+            pass
+
+        # For India, also try Zomato and Swiggy for additional options
+        if is_india:
+            try:
+                zomato_result = await scrape_zomato_restaurants.ainvoke({
+                    "city": city,
+                    "max_results": 10,
+                })
+                parsed = json.loads(zomato_result)
+                if not parsed.get("error"):
+                    for r in parsed.get("restaurants", []):
+                        r["source"] = "zomato"
+                        all_reviews.append(r)
+            except Exception:
+                pass
+
+            try:
+                swiggy_result = await scrape_swiggy_restaurants.ainvoke({
+                    "city": city,
+                    "max_results": 10,
+                })
+                parsed = json.loads(swiggy_result)
+                if not parsed.get("error"):
+                    for r in parsed.get("restaurants", []):
+                        r["source"] = "swiggy"
+                        all_reviews.append(r)
+            except Exception:
+                pass
+
+        # Sort by rating and review count (highest first)
+        all_reviews.sort(
+            key=lambda x: (x.get("rating") or 0, x.get("review_count") or 0),
+            reverse=True,
+        )
+
+        return all_reviews
+
+    def _build_reviews_section(self, scraped_reviews: list[dict] | None) -> str:
+        """Build the reviews section for the LLM prompt.
+
+        Args:
+            scraped_reviews: List of scraped restaurant reviews.
+
+        Returns:
+            Formatted string with review data.
+        """
+        if not scraped_reviews:
+            return ""
+
+        lines = ["\nREAL RESTAURANT REVIEWS (from Google Maps, Zomato, Swiggy):"]
+        lines.append("(Prioritize these highly-rated restaurants in your recommendations)\n")
+
+        for r in scraped_reviews[:15]:  # Limit to top 15
+            name = r.get("name", "Unknown")
+            rating = r.get("rating")
+            review_count = r.get("review_count")
+            source = r.get("source", "unknown")
+            cuisines = r.get("cuisine_types", [])
+            price_level = r.get("price_level", "unknown")
+
+            line = f"- {name}"
+            if rating:
+                line += f" ★{rating:.1f}"
+            if review_count:
+                line += f" ({review_count:,} reviews)"
+            line += f" [{source}]"
+
+            if cuisines:
+                line += f" | {', '.join(cuisines[:3])}"
+            if price_level and price_level != "unknown":
+                line += f" | {price_level}"
+
+            lines.append(line)
+
+            # Add review highlights if available
+            highlights = r.get("review_highlights", [])
+            if highlights:
+                lines.append(f"  → \"{highlights[0]}\"")
+
+            # Add popular dishes if available
+            dishes = r.get("popular_dishes", [])
+            if dishes:
+                lines.append(f"  → Popular: {', '.join(dishes[:3])}")
+
+        return "\n".join(lines)
+
+    def _find_matching_review(
+        self,
+        restaurant_name: Optional[str],
+        scraped_reviews: list[dict] | None,
+    ) -> Optional[dict]:
+        """Find a matching review for a restaurant name.
+
+        Args:
+            restaurant_name: Name of the restaurant to match.
+            scraped_reviews: List of scraped reviews.
+
+        Returns:
+            Matching review data or None.
+        """
+        if not restaurant_name or not scraped_reviews:
+            return None
+
+        name_lower = restaurant_name.lower().strip()
+
+        # Try exact match first
+        for r in scraped_reviews:
+            scraped_name = (r.get("name") or "").lower().strip()
+            if scraped_name == name_lower:
+                return r
+
+        # Try partial match
+        for r in scraped_reviews:
+            scraped_name = (r.get("name") or "").lower().strip()
+            # Check if either name contains the other
+            if name_lower in scraped_name or scraped_name in name_lower:
+                return r
+
+            # Check if main words match
+            name_words = set(name_lower.split())
+            scraped_words = set(scraped_name.split())
+            common_words = name_words & scraped_words
+            # If more than half the words match, consider it a match
+            if len(common_words) >= min(len(name_words), len(scraped_words)) / 2:
+                return r
+
+        return None

@@ -220,10 +220,10 @@ class CriticOutput(BaseModel):
 class ClarificationQuestion(BaseModel):
     """A single clarification question to ask the user."""
 
-    question_id: str = Field(description="Unique identifier (e.g., 'origin_city', 'dietary')")
+    question_id: str = Field(description="Unique identifier (e.g., 'travel_dates', 'origin_city', 'dietary')")
     question_text: str = Field(description="The question to display to the user")
     question_type: str = Field(
-        description="Type: origin_city, specific_destinations, visited_places, dietary, travel_pace"
+        description="Type: travel_dates, origin_city, specific_destinations, visited_places, dietary, travel_pace"
     )
     required: bool = Field(default=True, description="Whether answer is required")
     options: list[str] = Field(
@@ -245,6 +245,10 @@ class InferredTripInfo(BaseModel):
     destination_cities: list[str] = Field(default_factory=list, description="Specific cities if mentioned")
     budget_level: Optional[str] = Field(default=None, description="Budget level if mentioned")
     travel_style: Optional[str] = Field(default=None, description="Travel style if mentioned")
+    # Travel dates inferred from request
+    travel_start_date: Optional[str] = Field(default=None, description="Start date if mentioned (ISO format)")
+    travel_end_date: Optional[str] = Field(default=None, description="End date if mentioned (ISO format)")
+    has_specific_dates: bool = Field(default=False, description="Whether specific dates were mentioned")
 
 
 class ClarificationOutput(BaseModel):

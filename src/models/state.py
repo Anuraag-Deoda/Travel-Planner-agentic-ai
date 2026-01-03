@@ -33,6 +33,12 @@ class AgentState(TypedDict):
     places_visited: Optional[list[str]]  # Places already visited (to avoid repeats)
     specific_destinations: Optional[list[str]]  # Specific cities/places requested
 
+    # Travel dates (for real-time pricing)
+    travel_start_date: Optional[str]  # ISO format: "2025-03-15"
+    travel_end_date: Optional[str]  # ISO format: "2025-03-22"
+    travel_date_flexibility: Optional[str]  # "specific", "flexible_week", "flexible_month"
+    travel_date_description: Optional[str]  # Natural language for flexible dates
+
     # Planner Agent outputs
     trip_summary: Optional[dict]  # {destination, duration, budget_level, traveler_profile}
     city_allocations: Optional[list[dict]]  # [{city, country, days, visit_order, highlights}]
@@ -48,6 +54,10 @@ class AgentState(TypedDict):
     # Food/Culture Agent outputs
     food_recommendations: Optional[list[dict]]  # [{city, dish, restaurant, budget_level}]
     cultural_tips: Optional[list[str]]
+
+    # Transport Scraper outputs (real-time pricing)
+    scraped_transport_prices: Optional[list[dict]]  # Raw scraped price data
+    nearest_stations: Optional[dict]  # {city: {airport, train_station, bus_station}}
 
     # Transport/Budget Agent outputs
     transport_options: Optional[list[dict]]  # [{from, to, mode, cost, duration}]
@@ -79,6 +89,11 @@ def get_initial_state(user_request: str) -> AgentState:
         travel_pace=None,
         places_visited=None,
         specific_destinations=None,
+        # Travel dates
+        travel_start_date=None,
+        travel_end_date=None,
+        travel_date_flexibility=None,
+        travel_date_description=None,
         # Planning fields
         trip_summary=None,
         city_allocations=None,
@@ -88,6 +103,8 @@ def get_initial_state(user_request: str) -> AgentState:
         research_sources=[],
         food_recommendations=None,
         cultural_tips=None,
+        scraped_transport_prices=None,
+        nearest_stations=None,
         transport_options=None,
         budget_breakdown=None,
         validation_result=None,

@@ -53,6 +53,39 @@ class Attraction(BaseModel):
     tips: Optional[str] = None
     source_url: Optional[str] = None
 
+    # Enhanced data from Google Places API
+    rating: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=5.0,
+        description="Rating out of 5 stars",
+    )
+    review_count: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of reviews",
+    )
+    photo_urls: list[str] = Field(
+        default_factory=list,
+        description="URLs to attraction photos",
+    )
+    google_maps_url: Optional[str] = Field(
+        default=None,
+        description="Google Maps URL for directions",
+    )
+    website: Optional[str] = Field(
+        default=None,
+        description="Official website URL",
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        description="Contact phone number",
+    )
+    review_highlights: list[str] = Field(
+        default_factory=list,
+        description="Key highlights from visitor reviews",
+    )
+
 
 class Meal(BaseModel):
     """A meal recommendation."""
@@ -65,6 +98,55 @@ class Meal(BaseModel):
     address: Optional[str] = None
     must_try_dishes: list[str] = Field(default_factory=list)
     dietary_notes: Optional[str] = None
+
+    # Review data (from scraped sources)
+    rating: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=5.0,
+        description="Rating out of 5 stars",
+    )
+    review_count: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of reviews",
+    )
+    review_source: Optional[str] = Field(
+        default=None,
+        description="Source: google_maps, zomato, swiggy, llm_generated",
+    )
+    review_highlights: list[str] = Field(
+        default_factory=list,
+        description="Key phrases from reviews",
+    )
+    popular_dishes_from_reviews: list[str] = Field(
+        default_factory=list,
+        description="Dishes mentioned frequently in reviews",
+    )
+    source_url: Optional[str] = Field(
+        default=None,
+        description="URL to the restaurant listing",
+    )
+    photo_urls: list[str] = Field(
+        default_factory=list,
+        description="URLs to restaurant photos",
+    )
+    google_maps_url: Optional[str] = Field(
+        default=None,
+        description="Google Maps URL for directions",
+    )
+    website: Optional[str] = Field(
+        default=None,
+        description="Restaurant website URL",
+    )
+    phone: Optional[str] = Field(
+        default=None,
+        description="Contact phone number",
+    )
+    opening_hours: list[str] = Field(
+        default_factory=list,
+        description="Opening hours by day",
+    )
 
 
 class TransportSegment(BaseModel):
