@@ -49,6 +49,7 @@ class AgentState(TypedDict):
 
     # Research Agent outputs - accumulates across multiple calls
     attractions: Annotated[list, add]  # [{city, name, description, duration_hours, ...}]
+    hotels: Annotated[list, add]  # [{city, name, rating, photo_urls, ...}] from Google Places API
     research_sources: Annotated[list, add]  # URLs browsed
 
     # Food/Culture Agent outputs
@@ -100,6 +101,7 @@ def get_initial_state(user_request: str) -> AgentState:
         route_validation=None,
         route_segments=None,
         attractions=[],
+        hotels=[],
         research_sources=[],
         food_recommendations=None,
         cultural_tips=None,

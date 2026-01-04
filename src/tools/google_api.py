@@ -1,10 +1,11 @@
-"""Google Places API tools for detailed restaurant and attraction data."""
+"""Google Places API (New) tools for detailed restaurant and attraction data."""
 
+import asyncio
 import os
 import json
 import httpx
+import logging
 from typing import Optional
-from urllib.parse import quote_plus
 
 from langchain_core.tools import tool
 
@@ -12,22 +13,273 @@ from src.cache.browser_cache import BrowserCache
 from src.cache.transport_cache import RESTAURANT_REVIEW_CACHE_TTL
 
 
+logger = logging.getLogger(__name__)
+
+# Load API key from environment
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-PLACES_BASE_URL = "https://maps.googleapis.com/maps/api/place"
-PHOTOS_BASE_URL = "https://maps.googleapis.com/maps/api/place/photo"
+if not GOOGLE_API_KEY:
+    # Try loading from .env file directly
+    from pathlib import Path
+    env_path = Path(__file__).parent.parent.parent / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                if line.startswith("GOOGLE_API_KEY"):
+                    GOOGLE_API_KEY = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+
+# New Places API (v1) endpoints
+PLACES_API_BASE = "https://places.googleapis.com/v1"
 
 # Cache TTLs
 ATTRACTION_CACHE_TTL = 604800  # 7 days for attractions
 PHOTO_CACHE_TTL = 604800  # 7 days for photos
 
 
-def _get_photo_url(photo_reference: str, max_width: int = 800) -> str:
-    """Generate a Google Places photo URL."""
+def _get_headers() -> dict:
+    """Get headers for Places API (New) requests."""
+    return {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": "*",
+    }
+
+
+def _get_photo_url(photo_name: str, max_width: int = 800) -> str:
+    """Generate a Google Places photo URL from the new API format.
+
+    The new API returns photo names like 'places/PLACE_ID/photos/PHOTO_REF'
+    """
     return (
-        f"{PHOTOS_BASE_URL}?maxwidth={max_width}"
-        f"&photo_reference={photo_reference}"
-        f"&key={GOOGLE_API_KEY}"
+        f"{PLACES_API_BASE}/{photo_name}/media"
+        f"?maxWidthPx={max_width}&key={GOOGLE_API_KEY}"
     )
+
+
+def _convert_price_level(level: Optional[str]) -> str:
+    """Convert Google's new price level format to descriptive string."""
+    if not level:
+        return "unknown"
+
+    mapping = {
+        "PRICE_LEVEL_FREE": "free",
+        "PRICE_LEVEL_INEXPENSIVE": "budget",
+        "PRICE_LEVEL_MODERATE": "moderate",
+        "PRICE_LEVEL_EXPENSIVE": "expensive",
+        "PRICE_LEVEL_VERY_EXPENSIVE": "luxury",
+    }
+    return mapping.get(level, "unknown")
+
+
+def _categorize_attraction(types: list[str]) -> str:
+    """Categorize attraction based on Google place types."""
+    type_set = set(types)
+
+    if type_set & {"museum", "art_gallery"}:
+        return "museum"
+    if type_set & {"hindu_temple", "church", "mosque", "synagogue", "place_of_worship"}:
+        return "religious_site"
+    if type_set & {"park", "natural_feature", "campground", "national_park"}:
+        return "nature"
+    if type_set & {"amusement_park", "zoo", "aquarium"}:
+        return "entertainment"
+    if type_set & {"shopping_mall", "market"}:
+        return "shopping"
+    if type_set & {"tourist_attraction", "point_of_interest", "historical_landmark"}:
+        return "landmark"
+    if type_set & {"restaurant", "cafe", "bar"}:
+        return "food_drink"
+
+    return "attraction"
+
+
+def _extract_dishes_from_reviews(reviews: list[dict]) -> list[str]:
+    """Extract food dishes mentioned in reviews."""
+    food_indicators = [
+        "try the", "must try", "recommend the", "order the", "loved the",
+        "amazing", "delicious", "best", "incredible", "fantastic",
+    ]
+
+    dishes = []
+    seen = set()
+
+    for review in reviews:
+        text = (review.get("text") or review.get("originalText", {}).get("text", "")).lower()
+
+        for indicator in food_indicators:
+            if indicator in text:
+                idx = text.find(indicator)
+                if idx != -1:
+                    after = text[idx + len(indicator):idx + len(indicator) + 50]
+                    words = after.strip().split()[:4]
+                    if words:
+                        dish = " ".join(words).strip(".,!?")
+                        if dish and dish not in seen and len(dish) > 3:
+                            seen.add(dish)
+                            dishes.append(dish.title())
+
+    return dishes[:8]
+
+
+async def _text_search(
+    client: httpx.AsyncClient,
+    query: str,
+    included_type: Optional[str] = None,
+    max_results: int = 20,
+) -> dict:
+    """Perform a text search using the new Places API.
+
+    Args:
+        client: HTTP client.
+        query: Search query.
+        included_type: Optional place type filter.
+        max_results: Maximum results to return.
+
+    Returns:
+        API response dict.
+    """
+    url = f"{PLACES_API_BASE}/places:searchText"
+
+    body = {
+        "textQuery": query,
+        "maxResultCount": min(max_results, 20),  # API max is 20
+        "languageCode": "en",
+    }
+
+    if included_type:
+        body["includedType"] = included_type
+
+    # Request specific fields to reduce response size
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": ",".join([
+            "places.id",
+            "places.displayName",
+            "places.formattedAddress",
+            "places.rating",
+            "places.userRatingCount",
+            "places.priceLevel",
+            "places.types",
+            "places.photos",
+            "places.websiteUri",
+            "places.nationalPhoneNumber",
+            "places.googleMapsUri",
+            "places.regularOpeningHours",
+            "places.reviews",
+            "places.editorialSummary",
+        ]),
+    }
+
+    try:
+        response = await client.post(url, json=body, headers=headers)
+        data = response.json()
+
+        if response.status_code != 200:
+            error_msg = data.get("error", {}).get("message", str(data))
+            logger.error(f"Places API error: {error_msg}")
+            return {"error": error_msg, "places": []}
+
+        return data
+    except Exception as e:
+        logger.error(f"Places API request failed: {e}")
+        return {"error": str(e), "places": []}
+
+
+async def _get_place_details(
+    client: httpx.AsyncClient,
+    place_id: str,
+) -> dict:
+    """Get detailed place information from the new Places API.
+
+    Args:
+        client: HTTP client.
+        place_id: Google Place ID.
+
+    Returns:
+        Place details dict.
+    """
+    url = f"{PLACES_API_BASE}/places/{place_id}"
+
+    headers = {
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": ",".join([
+            "id",
+            "displayName",
+            "formattedAddress",
+            "rating",
+            "userRatingCount",
+            "priceLevel",
+            "types",
+            "photos",
+            "websiteUri",
+            "nationalPhoneNumber",
+            "googleMapsUri",
+            "regularOpeningHours",
+            "reviews",
+            "editorialSummary",
+        ]),
+    }
+
+    try:
+        response = await client.get(url, headers=headers)
+
+        if response.status_code != 200:
+            return {}
+
+        return response.json()
+    except Exception:
+        return {}
+
+
+def _parse_place(place: dict, city: str) -> dict:
+    """Parse a place from the new API format into our standard format."""
+    place_id = place.get("id", "")
+
+    # Get photos
+    photo_urls = []
+    photos = place.get("photos", [])
+    for photo in photos[:4]:
+        photo_name = photo.get("name")
+        if photo_name:
+            photo_urls.append(_get_photo_url(photo_name))
+
+    # Get reviews
+    reviews = place.get("reviews", [])
+    review_highlights = []
+    for review in reviews[:5]:
+        text = review.get("text", {}).get("text", "") or review.get("originalText", {}).get("text", "")
+        if text:
+            review_highlights.append({
+                "text": text[:200],
+                "rating": review.get("rating"),
+                "author": review.get("authorAttribution", {}).get("displayName"),
+            })
+
+    # Get opening hours
+    opening_hours = []
+    hours_data = place.get("regularOpeningHours", {})
+    if hours_data:
+        opening_hours = hours_data.get("weekdayDescriptions", [])
+
+    return {
+        "name": place.get("displayName", {}).get("text", "Unknown"),
+        "city": city,
+        "address": place.get("formattedAddress", ""),
+        "rating": place.get("rating"),
+        "review_count": place.get("userRatingCount"),
+        "price_level": _convert_price_level(place.get("priceLevel")),
+        "types": place.get("types", []),
+        "source": "google_places_api",
+        "place_id": place_id,
+        "phone": place.get("nationalPhoneNumber"),
+        "website": place.get("websiteUri"),
+        "google_maps_url": place.get("googleMapsUri"),
+        "opening_hours": opening_hours,
+        "review_highlights": review_highlights,
+        "photo_urls": photo_urls,
+        "editorial_summary": place.get("editorialSummary", {}).get("text", ""),
+    }
 
 
 @tool
@@ -50,10 +302,11 @@ async def search_restaurants_places_api(
         return json.dumps({"error": "Google API key not configured", "restaurants": []})
 
     cache = BrowserCache.get_instance()
-    cache_key = f"places_restaurants:{city}:{cuisine or 'all'}"
+    cache_key = f"places_restaurants_v2:{city}:{cuisine or 'all'}"
 
     cached = cache.get(cache_key)
     if cached:
+        logger.info(f"Using cached restaurant data for {city}")
         return cached
 
     result = {
@@ -65,78 +318,28 @@ async def search_restaurants_places_api(
     }
 
     try:
-        # Build search query
         query = f"best {cuisine + ' ' if cuisine else ''}restaurants in {city}"
+        logger.info(f"Searching restaurants: {query}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Text search for restaurants
-            search_url = f"{PLACES_BASE_URL}/textsearch/json"
-            search_params = {
-                "query": query,
-                "type": "restaurant",
-                "key": GOOGLE_API_KEY,
-            }
+            data = await _text_search(client, query, included_type="restaurant", max_results=max_results)
 
-            response = await client.get(search_url, params=search_params)
-            data = response.json()
-
-            if data.get("status") != "OK":
-                result["error"] = data.get("status")
+            if data.get("error"):
+                result["error"] = data["error"]
                 return json.dumps(result)
 
-            places = data.get("results", [])[:max_results]
+            places = data.get("places", [])
+            logger.info(f"Found {len(places)} restaurants in {city}")
 
-            # Get detailed info for each place
             for place in places:
-                place_id = place.get("place_id")
-
-                # Get place details
-                details = await _get_place_details(client, place_id)
-
-                restaurant = {
-                    "name": place.get("name"),
-                    "city": city,
-                    "address": place.get("formatted_address"),
-                    "rating": place.get("rating"),
-                    "review_count": place.get("user_ratings_total"),
-                    "price_level": _convert_price_level(place.get("price_level")),
-                    "cuisine_types": details.get("types", []),
-                    "source": "google_places_api",
-                    "place_id": place_id,
-
-                    # Detailed info from Place Details API
-                    "phone": details.get("phone"),
-                    "website": details.get("website"),
-                    "open_now": details.get("open_now"),
-                    "opening_hours": details.get("opening_hours"),
-                    "google_maps_url": details.get("url"),
-
-                    # Reviews with actual text
-                    "review_highlights": details.get("reviews", []),
-                    "popular_dishes": [],  # Will be extracted from reviews
-
-                    # Photos
-                    "photos": [],
-                    "photo_urls": [],
-                }
-
-                # Get photo URLs
-                photos = place.get("photos", [])
-                for photo in photos[:3]:  # Get up to 3 photos
-                    photo_ref = photo.get("photo_reference")
-                    if photo_ref:
-                        restaurant["photos"].append(photo_ref)
-                        restaurant["photo_urls"].append(_get_photo_url(photo_ref))
-
-                # Extract dishes mentioned in reviews
-                restaurant["popular_dishes"] = _extract_dishes_from_reviews(
-                    details.get("raw_reviews", [])
-                )
-
+                restaurant = _parse_place(place, city)
+                restaurant["cuisine_types"] = [t for t in place.get("types", []) if "restaurant" not in t.lower()]
+                restaurant["popular_dishes"] = _extract_dishes_from_reviews(place.get("reviews", []))
                 result["restaurants"].append(restaurant)
 
     except Exception as e:
         result["error"] = str(e)
+        logger.error(f"Restaurant search exception: {e}")
 
     json_result = json.dumps(result)
 
@@ -174,51 +377,15 @@ async def get_restaurant_details_places_api(
         query = f"{restaurant_name} restaurant {city}"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Find the place
-            search_url = f"{PLACES_BASE_URL}/findplacefromtext/json"
-            search_params = {
-                "input": query,
-                "inputtype": "textquery",
-                "fields": "place_id,name,formatted_address,rating,user_ratings_total,price_level,photos",
-                "key": GOOGLE_API_KEY,
-            }
+            data = await _text_search(client, query, included_type="restaurant", max_results=1)
 
-            response = await client.get(search_url, params=search_params)
-            data = response.json()
-
-            if data.get("status") != "OK" or not data.get("candidates"):
-                result["error"] = "Restaurant not found"
+            if data.get("error") or not data.get("places"):
+                result["error"] = data.get("error") or "Restaurant not found"
                 return json.dumps(result)
 
-            place = data["candidates"][0]
-            place_id = place.get("place_id")
-
-            # Get full details
-            details = await _get_place_details(client, place_id, include_reviews=True)
-
-            result.update({
-                "name": place.get("name"),
-                "address": place.get("formatted_address"),
-                "rating": place.get("rating"),
-                "review_count": place.get("user_ratings_total"),
-                "price_level": _convert_price_level(place.get("price_level")),
-                "phone": details.get("phone"),
-                "website": details.get("website"),
-                "open_now": details.get("open_now"),
-                "opening_hours": details.get("opening_hours"),
-                "google_maps_url": details.get("url"),
-                "reviews": details.get("reviews", []),
-                "review_highlights": details.get("reviews", [])[:5],
-                "popular_dishes": _extract_dishes_from_reviews(details.get("raw_reviews", [])),
-                "photo_urls": [],
-            })
-
-            # Get photos
-            photos = place.get("photos", [])
-            for photo in photos[:5]:
-                photo_ref = photo.get("photo_reference")
-                if photo_ref:
-                    result["photo_urls"].append(_get_photo_url(photo_ref, max_width=1200))
+            place = data["places"][0]
+            result.update(_parse_place(place, city))
+            result["popular_dishes"] = _extract_dishes_from_reviews(place.get("reviews", []))
 
     except Exception as e:
         result["error"] = str(e)
@@ -246,10 +413,11 @@ async def search_attractions_places_api(
         return json.dumps({"error": "Google API key not configured", "attractions": []})
 
     cache = BrowserCache.get_instance()
-    cache_key = f"places_attractions:{city}:{attraction_type or 'all'}"
+    cache_key = f"places_attractions_v2:{city}:{attraction_type or 'all'}"
 
     cached = cache.get(cache_key)
     if cached:
+        logger.info(f"Using cached attraction data for {city}")
         return cached
 
     result = {
@@ -261,72 +429,31 @@ async def search_attractions_places_api(
     }
 
     try:
-        # Build search query
         if attraction_type:
             query = f"{attraction_type} in {city}"
         else:
-            query = f"top tourist attractions in {city}"
+            query = f"top tourist attractions things to do in {city}"
+
+        logger.info(f"Searching attractions: {query}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            search_url = f"{PLACES_BASE_URL}/textsearch/json"
-            search_params = {
-                "query": query,
-                "key": GOOGLE_API_KEY,
-            }
+            data = await _text_search(client, query, max_results=max_results)
 
-            response = await client.get(search_url, params=search_params)
-            data = response.json()
-
-            if data.get("status") != "OK":
-                result["error"] = data.get("status")
+            if data.get("error"):
+                result["error"] = data["error"]
                 return json.dumps(result)
 
-            places = data.get("results", [])[:max_results]
+            places = data.get("places", [])
+            logger.info(f"Found {len(places)} attractions in {city}")
 
             for place in places:
-                place_id = place.get("place_id")
-
-                # Get additional details
-                details = await _get_place_details(client, place_id)
-
-                attraction = {
-                    "name": place.get("name"),
-                    "city": city,
-                    "address": place.get("formatted_address"),
-                    "rating": place.get("rating"),
-                    "review_count": place.get("user_ratings_total"),
-                    "types": place.get("types", []),
-                    "category": _categorize_attraction(place.get("types", [])),
-                    "source": "google_places_api",
-                    "place_id": place_id,
-
-                    # Details
-                    "phone": details.get("phone"),
-                    "website": details.get("website"),
-                    "open_now": details.get("open_now"),
-                    "opening_hours": details.get("opening_hours"),
-                    "google_maps_url": details.get("url"),
-
-                    # Reviews
-                    "review_highlights": details.get("reviews", [])[:3],
-
-                    # Photos
-                    "photos": [],
-                    "photo_urls": [],
-                }
-
-                # Get photo URLs
-                photos = place.get("photos", [])
-                for photo in photos[:4]:
-                    photo_ref = photo.get("photo_reference")
-                    if photo_ref:
-                        attraction["photos"].append(photo_ref)
-                        attraction["photo_urls"].append(_get_photo_url(photo_ref, max_width=1200))
-
+                attraction = _parse_place(place, city)
+                attraction["category"] = _categorize_attraction(place.get("types", []))
                 result["attractions"].append(attraction)
 
     except Exception as e:
         result["error"] = str(e)
+        logger.error(f"Attraction search exception: {e}")
 
     json_result = json.dumps(result)
 
@@ -364,50 +491,15 @@ async def get_attraction_details_places_api(
         query = f"{attraction_name} {city}"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            search_url = f"{PLACES_BASE_URL}/findplacefromtext/json"
-            search_params = {
-                "input": query,
-                "inputtype": "textquery",
-                "fields": "place_id,name,formatted_address,rating,user_ratings_total,types,photos,geometry",
-                "key": GOOGLE_API_KEY,
-            }
+            data = await _text_search(client, query, max_results=1)
 
-            response = await client.get(search_url, params=search_params)
-            data = response.json()
-
-            if data.get("status") != "OK" or not data.get("candidates"):
-                result["error"] = "Attraction not found"
+            if data.get("error") or not data.get("places"):
+                result["error"] = data.get("error") or "Attraction not found"
                 return json.dumps(result)
 
-            place = data["candidates"][0]
-            place_id = place.get("place_id")
-
-            # Get full details
-            details = await _get_place_details(client, place_id, include_reviews=True)
-
-            result.update({
-                "name": place.get("name"),
-                "address": place.get("formatted_address"),
-                "rating": place.get("rating"),
-                "review_count": place.get("user_ratings_total"),
-                "types": place.get("types", []),
-                "category": _categorize_attraction(place.get("types", [])),
-                "phone": details.get("phone"),
-                "website": details.get("website"),
-                "open_now": details.get("open_now"),
-                "opening_hours": details.get("opening_hours"),
-                "google_maps_url": details.get("url"),
-                "reviews": details.get("reviews", []),
-                "location": place.get("geometry", {}).get("location"),
-                "photo_urls": [],
-            })
-
-            # Get photos
-            photos = place.get("photos", [])
-            for photo in photos[:6]:
-                photo_ref = photo.get("photo_reference")
-                if photo_ref:
-                    result["photo_urls"].append(_get_photo_url(photo_ref, max_width=1200))
+            place = data["places"][0]
+            result.update(_parse_place(place, city))
+            result["category"] = _categorize_attraction(place.get("types", []))
 
     except Exception as e:
         result["error"] = str(e)
@@ -415,145 +507,112 @@ async def get_attraction_details_places_api(
     return json.dumps(result)
 
 
-async def _get_place_details(
-    client: httpx.AsyncClient,
-    place_id: str,
-    include_reviews: bool = True,
-) -> dict:
-    """Get detailed place information from Places API.
+@tool
+async def search_hotels_places_api(
+    city: str,
+    budget_level: Optional[str] = None,
+    max_results: int = 10,
+) -> str:
+    """Search for hotels using Google Places API with detailed info and photos.
 
     Args:
-        client: HTTP client.
-        place_id: Google Place ID.
-        include_reviews: Whether to fetch reviews.
+        city: City to search in.
+        budget_level: Optional budget level ("budget", "mid_range", "luxury").
+        max_results: Maximum number of results.
 
     Returns:
-        Dictionary with place details.
+        JSON with detailed hotel data including ratings, reviews, photos, amenities.
     """
-    details_url = f"{PLACES_BASE_URL}/details/json"
+    if not GOOGLE_API_KEY:
+        logger.error("Google API key not configured for hotel search")
+        return json.dumps({"error": "Google API key not configured", "hotels": []})
 
-    fields = [
-        "name",
-        "formatted_phone_number",
-        "website",
-        "opening_hours",
-        "url",
-        "types",
-    ]
-    if include_reviews:
-        fields.append("reviews")
+    cache = BrowserCache.get_instance()
+    cache_key = f"places_hotels_v2:{city}:{budget_level or 'all'}"
 
-    params = {
-        "place_id": place_id,
-        "fields": ",".join(fields),
-        "key": GOOGLE_API_KEY,
+    cached = cache.get(cache_key)
+    if cached:
+        logger.info(f"Using cached hotel data for {city}")
+        return cached
+
+    result = {
+        "source": "google_places_api",
+        "city": city,
+        "budget_level": budget_level,
+        "hotels": [],
+        "error": None,
     }
 
     try:
-        response = await client.get(details_url, params=params)
-        data = response.json()
+        # Build search query based on budget
+        if budget_level == "budget":
+            query = f"budget hotels hostels guesthouses in {city}"
+        elif budget_level == "luxury":
+            query = f"luxury 5 star hotels resorts in {city}"
+        else:
+            query = f"best hotels in {city}"
 
-        if data.get("status") != "OK":
-            return {}
+        logger.info(f"Searching hotels: {query}")
 
-        result_data = data.get("result", {})
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            data = await _text_search(client, query, included_type="hotel", max_results=max_results)
 
-        details = {
-            "phone": result_data.get("formatted_phone_number"),
-            "website": result_data.get("website"),
-            "url": result_data.get("url"),
-            "types": result_data.get("types", []),
+            if data.get("error"):
+                result["error"] = data["error"]
+                logger.error(f"Hotel search failed: {result['error']}")
+                return json.dumps(result)
+
+            places = data.get("places", [])
+            logger.info(f"Found {len(places)} hotels in {city}")
+
+            for place in places:
+                hotel = _parse_place(place, city)
+                result["hotels"].append(hotel)
+
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Hotel search exception: {e}")
+
+    json_result = json.dumps(result)
+
+    if not result.get("error") and result["hotels"]:
+        cache.set(cache_key, json_result, ttl=ATTRACTION_CACHE_TTL)
+
+    return json_result
+
+
+async def search_all_city_data(city: str, budget_level: str = "mid_range") -> dict:
+    """Search for all city data (attractions, restaurants, hotels) in parallel.
+
+    Args:
+        city: City name.
+        budget_level: Budget level for filtering.
+
+    Returns:
+        Dict with attractions, restaurants, and hotels.
+    """
+    logger.info(f"Fetching all data for {city} in parallel...")
+
+    # Run all searches in parallel
+    results = await asyncio.gather(
+        search_attractions_places_api.ainvoke({"city": city, "max_results": 15}),
+        search_restaurants_places_api.ainvoke({"city": city, "max_results": 15}),
+        search_hotels_places_api.ainvoke({"city": city, "budget_level": budget_level, "max_results": 8}),
+        return_exceptions=True,
+    )
+
+    attractions_data = json.loads(results[0]) if not isinstance(results[0], Exception) else {"attractions": [], "error": str(results[0])}
+    restaurants_data = json.loads(results[1]) if not isinstance(results[1], Exception) else {"restaurants": [], "error": str(results[1])}
+    hotels_data = json.loads(results[2]) if not isinstance(results[2], Exception) else {"hotels": [], "error": str(results[2])}
+
+    return {
+        "city": city,
+        "attractions": attractions_data.get("attractions", []),
+        "restaurants": restaurants_data.get("restaurants", []),
+        "hotels": hotels_data.get("hotels", []),
+        "errors": {
+            "attractions": attractions_data.get("error"),
+            "restaurants": restaurants_data.get("error"),
+            "hotels": hotels_data.get("error"),
         }
-
-        # Parse opening hours
-        hours = result_data.get("opening_hours", {})
-        if hours:
-            details["open_now"] = hours.get("open_now")
-            details["opening_hours"] = hours.get("weekday_text", [])
-
-        # Parse reviews
-        if include_reviews:
-            reviews = result_data.get("reviews", [])
-            details["raw_reviews"] = reviews
-            details["reviews"] = [
-                {
-                    "text": r.get("text", "")[:200],  # Truncate long reviews
-                    "rating": r.get("rating"),
-                    "author": r.get("author_name"),
-                    "time_description": r.get("relative_time_description"),
-                }
-                for r in reviews[:5]
-            ]
-
-        return details
-
-    except Exception:
-        return {}
-
-
-def _convert_price_level(level: Optional[int]) -> str:
-    """Convert Google's price level (0-4) to descriptive string."""
-    if level is None:
-        return "unknown"
-
-    mapping = {
-        0: "free",
-        1: "budget",
-        2: "moderate",
-        3: "expensive",
-        4: "luxury",
     }
-    return mapping.get(level, "unknown")
-
-
-def _categorize_attraction(types: list[str]) -> str:
-    """Categorize attraction based on Google place types."""
-    type_set = set(types)
-
-    if type_set & {"museum", "art_gallery"}:
-        return "museum"
-    if type_set & {"hindu_temple", "church", "mosque", "synagogue", "place_of_worship"}:
-        return "religious_site"
-    if type_set & {"park", "natural_feature", "campground"}:
-        return "nature"
-    if type_set & {"amusement_park", "zoo", "aquarium"}:
-        return "entertainment"
-    if type_set & {"shopping_mall", "market"}:
-        return "shopping"
-    if type_set & {"tourist_attraction", "point_of_interest"}:
-        return "landmark"
-    if type_set & {"restaurant", "cafe", "bar"}:
-        return "food_drink"
-
-    return "attraction"
-
-
-def _extract_dishes_from_reviews(reviews: list[dict]) -> list[str]:
-    """Extract food dishes mentioned in reviews."""
-    # Common food-related words to look for
-    food_indicators = [
-        "try the", "must try", "recommend the", "order the", "loved the",
-        "amazing", "delicious", "best", "incredible", "fantastic",
-    ]
-
-    dishes = []
-    seen = set()
-
-    for review in reviews:
-        text = (review.get("text") or "").lower()
-
-        for indicator in food_indicators:
-            if indicator in text:
-                # Find words after the indicator
-                idx = text.find(indicator)
-                if idx != -1:
-                    # Get the next few words
-                    after = text[idx + len(indicator):idx + len(indicator) + 50]
-                    words = after.strip().split()[:4]
-                    if words:
-                        dish = " ".join(words).strip(".,!?")
-                        if dish and dish not in seen and len(dish) > 3:
-                            seen.add(dish)
-                            dishes.append(dish.title())
-
-    return dishes[:8]  # Return top 8 dishes

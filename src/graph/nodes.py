@@ -372,6 +372,7 @@ async def finalize_node(state: AgentState) -> dict[str, Any]:
     city_allocations = state.get("city_allocations", [])
     route_segments = state.get("route_segments", [])
     attractions = state.get("attractions", [])
+    hotels = state.get("hotels", [])
     food_recommendations = state.get("food_recommendations", [])
     transport_options = state.get("transport_options", [])
     budget_breakdown = state.get("budget_breakdown", {})
@@ -560,6 +561,7 @@ async def finalize_node(state: AgentState) -> dict[str, Any]:
         "packing_suggestions": [],
         "warnings": validation_result.get("final_recommendations", []),
         "sources_consulted": state.get("research_sources", []),
+        "hotels": hotels,
     }
 
     message = AIMessage(

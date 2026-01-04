@@ -1,6 +1,8 @@
 """Research/Browser Agent - Browses the web for attractions and current information."""
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -10,7 +12,15 @@ from src.config.constants import RESEARCH_TEMPERATURE, MAX_ATTRACTIONS_PER_CITY
 from src.models.agent_outputs import ResearchOutput
 from src.models.state import AgentState
 from src.tools.browser.playwright_tools import search_attractions, get_attraction_details
-from src.tools.google_api import search_attractions_places_api, get_attraction_details_places_api
+from src.tools.google_api import (
+    search_attractions_places_api,
+    search_restaurants_places_api,
+    search_hotels_places_api,
+    search_all_city_data,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 RESEARCH_SYSTEM_PROMPT = """You are a travel research specialist. Your job is to find accurate, current information about tourist attractions and things to do in cities.
@@ -75,65 +85,92 @@ class ResearchAgent(BaseAgent):
             }
 
         all_attractions = []
+        all_hotels = []
         all_sources = []
 
-        # Research each city
-        for allocation in city_allocations:
+        budget_level = state.get("trip_summary", {}).get("budget_level", "mid_range")
+
+        # Research all cities in PARALLEL for speed
+        async def research_city(allocation):
             city = allocation.get("city", "")
             country = allocation.get("country", "")
             days = allocation.get("days", 1)
 
             if not city:
-                continue
+                return [], [], []
 
-            # Calculate how many attractions to find based on days
-            # Roughly 3-4 attractions per day is realistic
+            logger.info(f"Researching {city} with Google Places API...")
+
             target_attractions = min(days * 4, MAX_ATTRACTIONS_PER_CITY)
+            city_attractions = []
+            city_hotels = []
+            city_sources = []
 
-            # First try Google Places API (more detailed data with photos)
-            places_api_data = []
+            # Try Google Places API for attractions and hotels in parallel
             try:
-                places_result = await search_attractions_places_api.ainvoke({
-                    "city": city,
-                    "max_results": target_attractions,
-                })
-                places_data = json.loads(places_result)
-                if not places_data.get("error"):
-                    places_api_data = places_data.get("attractions", [])
-                    all_sources.append(f"Google Places API: {city}")
-            except Exception:
-                pass
-
-            # Fallback to browser tool if Places API didn't return enough
-            browser_data = []
-            if len(places_api_data) < target_attractions // 2:
-                try:
-                    search_result = await search_attractions.ainvoke({
+                attractions_result, hotels_result = await asyncio.gather(
+                    search_attractions_places_api.ainvoke({
                         "city": city,
-                        "country": country,
                         "max_results": target_attractions,
-                    })
-                    search_data = json.loads(search_result)
-                    if "error" not in search_data:
-                        browser_data = search_data.get("attractions", [])
-                except Exception:
-                    pass
-
-            # Combine data, preferring Places API data
-            combined_data = places_api_data + browser_data
-
-            if combined_data:
-                # Use LLM to clean up and structure the attractions
-                structured_attractions = await self._structure_attractions(
-                    city=city,
-                    country=country,
-                    raw_data=combined_data,
-                    days=days,
-                    places_api_data=places_api_data,
+                    }),
+                    search_hotels_places_api.ainvoke({
+                        "city": city,
+                        "budget_level": budget_level,
+                        "max_results": 5,
+                    }),
+                    return_exceptions=True,
                 )
 
-                all_attractions.extend(structured_attractions.attractions_found)
-                all_sources.extend(structured_attractions.sources_browsed)
+                # Process attractions
+                if not isinstance(attractions_result, Exception):
+                    places_data = json.loads(attractions_result)
+                    if not places_data.get("error"):
+                        places_api_data = places_data.get("attractions", [])
+                        city_sources.append(f"Google Places API: {city} attractions")
+                        logger.info(f"Found {len(places_api_data)} attractions in {city}")
+
+                        if places_api_data:
+                            # Use LLM to structure
+                            structured = await self._structure_attractions(
+                                city=city,
+                                country=country,
+                                raw_data=places_api_data,
+                                days=days,
+                                places_api_data=places_api_data,
+                            )
+                            city_attractions = list(structured.attractions_found)
+                            city_sources.extend(structured.sources_browsed)
+                    else:
+                        logger.warning(f"Attractions API error for {city}: {places_data.get('error')}")
+                else:
+                    logger.error(f"Attractions exception for {city}: {attractions_result}")
+
+                # Process hotels
+                if not isinstance(hotels_result, Exception):
+                    hotels_data = json.loads(hotels_result)
+                    if not hotels_data.get("error"):
+                        city_hotels = hotels_data.get("hotels", [])
+                        city_sources.append(f"Google Places API: {city} hotels")
+                        logger.info(f"Found {len(city_hotels)} hotels in {city}")
+                    else:
+                        logger.warning(f"Hotels API error for {city}: {hotels_data.get('error')}")
+                else:
+                    logger.error(f"Hotels exception for {city}: {hotels_result}")
+
+            except Exception as e:
+                logger.error(f"Research error for {city}: {e}")
+                city_sources.append(f"Error researching {city}: {str(e)}")
+
+            return city_attractions, city_hotels, city_sources
+
+        # Run all city research in parallel
+        city_tasks = [research_city(alloc) for alloc in city_allocations if alloc.get("city")]
+        results = await asyncio.gather(*city_tasks)
+
+        for attractions, hotels, sources in results:
+            all_attractions.extend(attractions)
+            all_hotels.extend(hotels)
+            all_sources.extend(sources)
 
         # Build final attractions list with enhanced data
         final_attractions = []
@@ -172,6 +209,7 @@ class ResearchAgent(BaseAgent):
 
         return {
             "attractions": final_attractions,
+            "hotels": all_hotels,
             "research_sources": all_sources,
         }
 

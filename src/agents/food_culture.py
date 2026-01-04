@@ -1,9 +1,14 @@
 """Food/Culture Agent - Provides food recommendations and cultural tips."""
 
+import asyncio
 import json
+import logging
 from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
+
+
+logger = logging.getLogger(__name__)
 
 from src.agents.base import BaseAgent
 from src.config.constants import FOOD_CULTURE_TEMPERATURE
@@ -117,17 +122,20 @@ class FoodCultureAgent(BaseAgent):
         all_food_recommendations = []
         all_cultural_tips = []
 
-        # Get recommendations for each city
-        for allocation in city_allocations:
+        # Process all cities in PARALLEL for speed
+        async def process_city(allocation):
             city = allocation.get("city", "")
             country = allocation.get("country", "")
             days = allocation.get("days", 1)
 
             if not city:
-                continue
+                return [], []
 
-            # Scrape restaurant reviews for this city
+            logger.info(f"Getting food recommendations for {city}...")
+
+            # Get restaurant data from Google Places API
             scraped_reviews = await self._scrape_restaurant_reviews(city, country)
+            logger.info(f"Found {len(scraped_reviews)} restaurants for {city}")
 
             result = await self._get_city_recommendations(
                 city=city,
@@ -138,6 +146,9 @@ class FoodCultureAgent(BaseAgent):
                 dietary_preferences=dietary_preferences,
                 scraped_reviews=scraped_reviews,
             )
+
+            city_recommendations = []
+            city_tips = []
 
             # Add food recommendations with review data
             for meal in result.restaurant_recommendations:
@@ -176,18 +187,29 @@ class FoodCultureAgent(BaseAgent):
                     food_rec["review_source"] = "llm_generated"
                     food_rec["photo_urls"] = []
 
-                all_food_recommendations.append(food_rec)
+                city_recommendations.append(food_rec)
 
-            # Collect cultural tips (deduplicate later)
-            all_cultural_tips.extend(result.cultural_dos)
-            all_cultural_tips.extend([f"Don't: {dont}" for dont in result.cultural_donts])
+            # Collect cultural tips
+            city_tips.extend(result.cultural_dos)
+            city_tips.extend([f"Don't: {dont}" for dont in result.cultural_donts])
 
             if result.dress_code_notes:
-                all_cultural_tips.append(f"Dress code: {result.dress_code_notes}")
+                city_tips.append(f"Dress code: {result.dress_code_notes}")
 
             if result.language_tips:
-                all_cultural_tips.append(f"Language: {result.language_tips}")
+                city_tips.append(f"Language: {result.language_tips}")
 
+            return city_recommendations, city_tips
+
+        # Run all cities in parallel
+        city_tasks = [process_city(alloc) for alloc in city_allocations]
+        results = await asyncio.gather(*city_tasks)
+
+        for recommendations, tips in results:
+            all_food_recommendations.extend(recommendations)
+            all_cultural_tips.extend(tips)
+
+        # Skip the old per-meal processing since we did it above
         # Deduplicate cultural tips while preserving order
         seen = set()
         unique_tips = []
@@ -211,20 +233,7 @@ class FoodCultureAgent(BaseAgent):
         dietary_preferences: list[str] | None = None,
         scraped_reviews: list[dict] | None = None,
     ) -> FoodCultureOutput:
-        """Get food and culture recommendations for a single city.
-
-        Args:
-            city: City name.
-            country: Country name.
-            days: Number of days in city.
-            budget_level: Trip budget level.
-            traveler_profile: Type of traveler.
-            dietary_preferences: List of dietary restrictions/preferences.
-            scraped_reviews: List of scraped restaurant reviews.
-
-        Returns:
-            FoodCultureOutput with recommendations.
-        """
+        """Get food and culture recommendations for a single city."""
         dietary_info = ""
         if dietary_preferences:
             dietary_info = f"- Dietary preferences: {', '.join(dietary_preferences)}"
@@ -251,9 +260,10 @@ Please provide:
 5. Dress code guidance
 6. Any language tips
 
-IMPORTANT: Each restaurant recommendation MUST have the correct meal_type set to exactly one of: "breakfast", "lunch", or "dinner".
-Focus on authentic local experiences appropriate for the budget level.
-When real review data is provided above, PRIORITIZE those highly-rated restaurants in your recommendations.
+IMPORTANT:
+- Each restaurant recommendation MUST have the correct meal_type set to exactly one of: "breakfast", "lunch", or "dinner".
+- When real review data is provided above, USE THOSE RESTAURANT NAMES in your recommendations.
+- Focus on authentic local experiences appropriate for the budget level.
 """
 
         structured_llm = self.get_structured_llm(FoodCultureOutput)
@@ -264,10 +274,7 @@ When real review data is provided above, PRIORITIZE those highly-rated restauran
         ]
 
         result = await structured_llm.ainvoke(messages)
-
-        # Ensure city is set
         result.city = city
-
         return result
 
     async def _scrape_restaurant_reviews(

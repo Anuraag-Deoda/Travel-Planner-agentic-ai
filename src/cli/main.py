@@ -227,10 +227,21 @@ def _display_itinerary(itinerary: dict):
 
                 if activity.get("attraction"):
                     attr = activity["attraction"]
-                    details = f"{attr.get('category', '')}, ~{attr.get('estimated_duration_hours', '?')}h"
+                    rating_str = ""
+                    if attr.get("rating"):
+                        rating_str = f" ★{attr.get('rating')}"
+                        if attr.get("review_count"):
+                            rating_str += f" ({attr.get('review_count'):,})"
+                    details = f"{attr.get('category', '')}{rating_str}, ~{attr.get('estimated_duration_hours', '?')}h"
                 elif activity.get("meal"):
                     meal = activity["meal"]
-                    details = f"${meal.get('estimated_cost_usd', '?')}"
+                    rating_str = ""
+                    if meal.get("rating"):
+                        rating_str = f" ★{meal.get('rating')}"
+                        if meal.get("review_count"):
+                            rating_str += f" ({meal.get('review_count'):,})"
+                    source = f" [{meal.get('review_source', '')}]" if meal.get("review_source") and meal.get("review_source") != "llm_generated" else ""
+                    details = f"${meal.get('estimated_cost_usd', '?')}{rating_str}{source}"
 
                 day_table.add_row(time_slot, title, details)
 
@@ -258,18 +269,69 @@ def _display_itinerary(itinerary: dict):
         transport_table.add_column("Route", style="cyan")
         transport_table.add_column("Mode")
         transport_table.add_column("Duration")
-        transport_table.add_column("Cost")
+        transport_table.add_column("Estimate")
+        transport_table.add_column("Real Price", style="green")
 
         for t in inter_city:
             rec = t.get("recommended", {})
+            real_price = t.get("real_price", {})
+
+            # Format real price if available
+            real_price_str = ""
+            if real_price and real_price.get("price_usd"):
+                real_price_str = f"${real_price.get('price_usd'):.0f}"
+                if real_price.get("source"):
+                    real_price_str += f" [{real_price.get('source')}]"
+                if real_price.get("operator"):
+                    real_price_str += f"\n{real_price.get('operator')}"
+
             transport_table.add_row(
                 f"{t.get('from_location')} → {t.get('to_location')}",
                 rec.get("mode", "N/A"),
                 f"{rec.get('duration_hours', '?')}h",
                 f"${rec.get('estimated_cost_usd', '?')}",
+                real_price_str or "N/A",
             )
 
+            # Show cheaper dates if available
+            cheaper_dates = t.get("cheaper_dates", [])
+            if cheaper_dates:
+                cheaper_str = ", ".join([f"{d.get('date')}: ${d.get('price_usd'):.0f}" for d in cheaper_dates[:2]])
+                console.print(f"    [dim]Cheaper dates: {cheaper_str}[/dim]")
+
         console.print(transport_table)
+        console.print()
+
+    # Hotels (from Google Places API)
+    hotels = itinerary.get("hotels", [])
+    if hotels:
+        console.print("[bold]Recommended Hotels:[/bold]")
+        hotel_table = Table(show_header=True, header_style="bold")
+        hotel_table.add_column("Hotel", style="cyan")
+        hotel_table.add_column("Rating")
+        hotel_table.add_column("Price Level")
+        hotel_table.add_column("Source")
+
+        for h in hotels[:5]:  # Show top 5
+            rating_str = ""
+            if h.get("rating"):
+                rating_str = f"★{h.get('rating')}"
+                if h.get("review_count"):
+                    rating_str += f" ({h.get('review_count'):,})"
+
+            hotel_table.add_row(
+                f"{h.get('name', 'Unknown')}\n[dim]{h.get('city', '')}[/dim]",
+                rating_str,
+                h.get("price_level", "N/A"),
+                "[green]Google Places[/green]" if h.get("source") == "google_places_api" else "N/A",
+            )
+
+            # Show review highlight
+            highlights = h.get("review_highlights", [])
+            if highlights and highlights[0]:
+                console.print(f"    [dim]\"{highlights[0][:80]}...\"[/dim]")
+
+        console.print(hotel_table)
         console.print()
 
     # Budget breakdown
