@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.agents.base import BaseAgent
 from src.config.constants import RESEARCH_TEMPERATURE, MAX_ATTRACTIONS_PER_CITY
 from src.models.agent_outputs import ResearchOutput
+from src.models.itinerary import Attraction
 from src.models.state import AgentState
 from src.tools.browser.playwright_tools import search_attractions, get_attraction_details
 from src.tools.google_api import (
@@ -122,6 +123,7 @@ class ResearchAgent(BaseAgent):
                 )
 
                 # Process attractions
+                api_failed = False
                 if not isinstance(attractions_result, Exception):
                     places_data = json.loads(attractions_result)
                     if not places_data.get("error"):
@@ -142,10 +144,25 @@ class ResearchAgent(BaseAgent):
                             city_sources.extend(structured.sources_browsed)
                     else:
                         logger.warning(f"Attractions API error for {city}: {places_data.get('error')}")
+                        api_failed = True
                 else:
                     logger.error(f"Attractions exception for {city}: {attractions_result}")
+                    api_failed = True
+
+                # FALLBACK: Generate attractions using LLM if API failed
+                if api_failed or not city_attractions:
+                    logger.info(f"Using LLM fallback for {city} attractions...")
+                    fallback_attractions = await self._generate_fallback_attractions(
+                        city=city,
+                        country=country,
+                        days=days,
+                    )
+                    if fallback_attractions:
+                        city_attractions = fallback_attractions
+                        city_sources.append(f"LLM Knowledge Base: {city} attractions (API unavailable)")
 
                 # Process hotels
+                hotels_api_failed = False
                 if not isinstance(hotels_result, Exception):
                     hotels_data = json.loads(hotels_result)
                     if not hotels_data.get("error"):
@@ -154,8 +171,22 @@ class ResearchAgent(BaseAgent):
                         logger.info(f"Found {len(city_hotels)} hotels in {city}")
                     else:
                         logger.warning(f"Hotels API error for {city}: {hotels_data.get('error')}")
+                        hotels_api_failed = True
                 else:
                     logger.error(f"Hotels exception for {city}: {hotels_result}")
+                    hotels_api_failed = True
+
+                # FALLBACK: Generate hotels using LLM if API failed
+                if hotels_api_failed or not city_hotels:
+                    logger.info(f"Using LLM fallback for {city} hotels...")
+                    fallback_hotels = await self._generate_fallback_hotels(
+                        city=city,
+                        country=country,
+                        budget_level=budget_level,
+                    )
+                    if fallback_hotels:
+                        city_hotels = fallback_hotels
+                        city_sources.append(f"LLM Knowledge Base: {city} hotels (API unavailable)")
 
             except Exception as e:
                 logger.error(f"Research error for {city}: {e}")
@@ -351,3 +382,160 @@ Return structured attraction data for these results.
                     ]
 
         return result
+
+    async def _generate_fallback_attractions(
+        self,
+        city: str,
+        country: str,
+        days: int,
+    ) -> list[Attraction]:
+        """Generate attraction data using LLM when Google API is unavailable.
+
+        This fallback uses the model's knowledge to generate reasonable
+        attraction data for popular tourist destinations.
+        """
+        target_count = min(days * 4, MAX_ATTRACTIONS_PER_CITY)
+
+        prompt = f"""Generate {target_count} real tourist attractions for {city}, {country}.
+
+IMPORTANT: Only include REAL attractions that actually exist. Do not make up fictional places.
+
+For each attraction, provide:
+- name: Exact real name of the attraction
+- description: 2-3 sentence description
+- category: One of (landmark, museum, temple, nature, market, palace, fort, beach, park, religious_site, entertainment)
+- estimated_duration_hours: Realistic visit time (1-4 hours typically)
+- address: Approximate or well-known address if possible
+- entrance_fee_usd: Approximate fee in USD (0 if free)
+- opening_hours: Typical hours like "9 AM - 6 PM" or "Open 24 hours"
+- tips: One useful tip for visitors
+- booking_required: true/false
+
+Include a mix of:
+- Major landmarks and must-see attractions
+- Cultural sites (temples, palaces, museums)
+- Local markets or shopping areas
+- Nature spots or parks
+- Hidden gems popular with locals
+
+Return valid JSON array of attractions."""
+
+        messages = [
+            SystemMessage(content="You are a travel expert with extensive knowledge of tourist destinations worldwide. Generate accurate, real attraction data."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages)
+            content = response.content
+
+            # Extract JSON from response
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+
+            attractions_data = json.loads(content)
+
+            # Convert to Attraction objects
+            attractions = []
+            for a in attractions_data:
+                try:
+                    attraction = Attraction(
+                        name=a.get("name", "Unknown"),
+                        city=city,
+                        description=a.get("description", ""),
+                        category=a.get("category", "attraction"),
+                        estimated_duration_hours=float(a.get("estimated_duration_hours", 2)),
+                        address=a.get("address"),
+                        opening_hours=a.get("opening_hours"),
+                        entrance_fee_usd=float(a.get("entrance_fee_usd", 0)) if a.get("entrance_fee_usd") else None,
+                        booking_required=a.get("booking_required", False),
+                        tips=a.get("tips"),
+                        source_url=None,
+                        rating=a.get("rating", 4.2),  # Default reasonable rating
+                        review_count=a.get("review_count"),
+                    )
+                    attractions.append(attraction)
+                except Exception as e:
+                    logger.warning(f"Failed to parse fallback attraction: {e}")
+                    continue
+
+            logger.info(f"Generated {len(attractions)} fallback attractions for {city}")
+            return attractions
+
+        except Exception as e:
+            logger.error(f"Fallback attraction generation failed for {city}: {e}")
+            return []
+
+    async def _generate_fallback_hotels(
+        self,
+        city: str,
+        country: str,
+        budget_level: str = "mid_range",
+    ) -> list[dict]:
+        """Generate hotel recommendations using LLM when Google API is unavailable."""
+
+        budget_descriptions = {
+            "budget": "budget-friendly hotels, hostels, and guesthouses ($30-80/night)",
+            "mid_range": "mid-range hotels with good amenities ($80-200/night)",
+            "luxury": "luxury hotels and 5-star resorts ($200+/night)",
+        }
+
+        budget_desc = budget_descriptions.get(budget_level, budget_descriptions["mid_range"])
+
+        prompt = f"""Generate 5 real hotel recommendations for {city}, {country}.
+Focus on {budget_desc}.
+
+IMPORTANT: Only include REAL hotels that actually exist. Do not make up fictional hotels.
+
+For each hotel, provide:
+- name: Exact real name of the hotel
+- city: {city}
+- address: Approximate address or neighborhood
+- rating: Typical rating (4.0-4.8 range)
+- review_count: Approximate review count
+- price_level: One of (budget, moderate, expensive, luxury)
+- review_highlights: Array of 2-3 typical positive review snippets
+
+Include well-known hotel chains and popular local hotels.
+Return valid JSON array."""
+
+        messages = [
+            SystemMessage(content="You are a travel expert with knowledge of hotels worldwide. Generate accurate, real hotel data."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages)
+            content = response.content
+
+            # Extract JSON
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+
+            hotels_data = json.loads(content)
+
+            # Normalize hotel data
+            hotels = []
+            for h in hotels_data:
+                hotel = {
+                    "name": h.get("name", "Unknown Hotel"),
+                    "city": city,
+                    "address": h.get("address", ""),
+                    "rating": h.get("rating", 4.0),
+                    "review_count": h.get("review_count", 500),
+                    "price_level": h.get("price_level", "moderate"),
+                    "source": "llm_fallback",
+                    "review_highlights": h.get("review_highlights", []),
+                }
+                hotels.append(hotel)
+
+            logger.info(f"Generated {len(hotels)} fallback hotels for {city}")
+            return hotels
+
+        except Exception as e:
+            logger.error(f"Fallback hotel generation failed for {city}: {e}")
+            return []
