@@ -1,0 +1,193 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: 20 184 166; /* teal-500 */
+    --color-secondary: 8 145 178; /* cyan-600 */
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  ::selection {
+    @apply bg-teal-500/20;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white border border-slate-200 rounded-2xl shadow-sm;
+  }
+
+  .card-hover {
+    @apply card hover:shadow-md hover:border-slate-300 transition-all duration-300;
+  }
+
+  .gradient-text {
+    @apply bg-gradient-to-r from-teal-500 to-cyan-600 bg-clip-text text-transparent;
+  }
+
+  .btn-primary {
+    @apply px-6 py-3 bg-gradient-to-r from-teal-500 to-cyan-600 text-white font-semibold rounded-xl
+           hover:from-teal-600 hover:to-cyan-700 active:scale-[0.98]
+           transition-all duration-200 shadow-lg shadow-teal-500/25
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-secondary {
+    @apply px-6 py-3 bg-slate-100 text-slate-700 font-semibold rounded-xl border border-slate-300
+           hover:bg-slate-200 hover:border-slate-400 active:scale-[0.98]
+           transition-all duration-200;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl
+           text-slate-900 placeholder-slate-400
+           focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20
+           transition-all duration-200;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-2 px-4 py-2 bg-slate-100 border border-slate-200 rounded-lg
+           text-sm text-slate-600 hover:bg-teal-50 hover:text-teal-700 hover:border-teal-300
+           transition-all duration-200 cursor-pointer;
+  }
+
+  .chip-selected {
+    @apply bg-teal-500 border-teal-500 text-white;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200;
+  }
+
+  .badge-warning {
+    @apply bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .badge-info {
+    @apply bg-teal-50 text-teal-700 border border-teal-200;
+  }
+}
+
+@layer utilities {
+  .animate-gradient {
+    background-size: 200% 200%;
+    animation: gradient 8s ease infinite;
+  }
+
+  @keyframes gradient {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+  }
+
+  /* Scrollbar */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-full hover:bg-slate-400;
+  }
+}
+
+/* Global scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Focus styles */
+*:focus-visible {
+  outline: 2px solid #14b8a6;
+  outline-offset: 2px;
+}
+
+/* Custom animations */
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.4s ease-out;
+}
+
+/* Loader */
+.loader {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #14b8a6;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Loading skeleton */
+.skeleton {
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
