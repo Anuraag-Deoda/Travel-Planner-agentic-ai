@@ -535,7 +535,7 @@ async def finalize_node(state: AgentState) -> dict[str, Any]:
 
     # Build final itinerary
     final_itinerary = {
-        "trip_title": f"{trip_summary.get('total_days', len(sorted_cities))}-Day {sorted_cities[0]['country'] if sorted_cities else 'Trip'}",
+        "trip_title": f"{trip_summary.get('total_days', len(sorted_cities))}-Day {sorted_cities[0].get('country', 'Trip') if sorted_cities else 'Trip'}",
         "destination_summary": trip_summary.get("understanding", ""),
         "total_days": trip_summary.get("total_days", len(daily_plans)),
         "travelers_count": 1,  # Default, could be extracted from trip_summary
