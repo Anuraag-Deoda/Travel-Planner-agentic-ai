@@ -199,7 +199,7 @@ def _display_itinerary(itinerary: dict):
     overview.add_row("Duration", f"{itinerary.get('total_days', '?')} days")
     overview.add_row("Cities", ", ".join(itinerary.get("cities_visited", [])))
     overview.add_row("Budget Level", itinerary.get("budget_level", "mid_range"))
-    overview.add_row("Estimated Cost", f"${itinerary.get('total_estimated_cost_usd', 0):.0f} USD")
+    overview.add_row("Estimated Cost", f"${(itinerary.get('total_estimated_cost_usd') or 0):.0f} USD")
 
     console.print(overview)
     console.print()
@@ -231,7 +231,7 @@ def _display_itinerary(itinerary: dict):
                     if attr.get("rating"):
                         rating_str = f" ★{attr.get('rating')}"
                         if attr.get("review_count"):
-                            rating_str += f" ({attr.get('review_count'):,})"
+                            rating_str += f" ({(attr.get('review_count') or 0):,})"
                     details = f"{attr.get('category', '')}{rating_str}, ~{attr.get('estimated_duration_hours', '?')}h"
                 elif activity.get("meal"):
                     meal = activity["meal"]
@@ -239,7 +239,7 @@ def _display_itinerary(itinerary: dict):
                     if meal.get("rating"):
                         rating_str = f" ★{meal.get('rating')}"
                         if meal.get("review_count"):
-                            rating_str += f" ({meal.get('review_count'):,})"
+                            rating_str += f" ({(meal.get('review_count') or 0):,})"
                     source = f" [{meal.get('review_source', '')}]" if meal.get("review_source") and meal.get("review_source") != "llm_generated" else ""
                     details = f"${meal.get('estimated_cost_usd', '?')}{rating_str}{source}"
 
@@ -279,7 +279,7 @@ def _display_itinerary(itinerary: dict):
             # Format real price if available
             real_price_str = ""
             if real_price and real_price.get("price_usd"):
-                real_price_str = f"${real_price.get('price_usd'):.0f}"
+                real_price_str = f"${(real_price.get('price_usd') or 0):.0f}"
                 if real_price.get("source"):
                     real_price_str += f" [{real_price.get('source')}]"
                 if real_price.get("operator"):
@@ -296,7 +296,7 @@ def _display_itinerary(itinerary: dict):
             # Show cheaper dates if available
             cheaper_dates = t.get("cheaper_dates", [])
             if cheaper_dates:
-                cheaper_str = ", ".join([f"{d.get('date')}: ${d.get('price_usd'):.0f}" for d in cheaper_dates[:2]])
+                cheaper_str = ", ".join([f"{d.get('date')}: ${(d.get('price_usd') or 0):.0f}" for d in cheaper_dates[:2]])
                 console.print(f"    [dim]Cheaper dates: {cheaper_str}[/dim]")
 
         console.print(transport_table)
@@ -317,7 +317,7 @@ def _display_itinerary(itinerary: dict):
             if h.get("rating"):
                 rating_str = f"★{h.get('rating')}"
                 if h.get("review_count"):
-                    rating_str += f" ({h.get('review_count'):,})"
+                    rating_str += f" ({(h.get('review_count') or 0):,})"
 
             hotel_table.add_row(
                 f"{h.get('name', 'Unknown')}\n[dim]{h.get('city', '')}[/dim]",
@@ -343,18 +343,18 @@ def _display_itinerary(itinerary: dict):
         budget_table.add_column("Amount", justify="right")
 
         if budget.get("transport_inter_city"):
-            budget_table.add_row("Inter-city Transport", f"${budget.get('transport_inter_city', 0):.0f}")
+            budget_table.add_row("Inter-city Transport", f"${(budget.get('transport_inter_city') or 0):.0f}")
         if budget.get("transport_local"):
-            budget_table.add_row("Local Transport", f"${budget.get('transport_local', 0):.0f}")
+            budget_table.add_row("Local Transport", f"${(budget.get('transport_local') or 0):.0f}")
         if budget.get("accommodation"):
-            budget_table.add_row("Accommodation", f"${budget.get('accommodation', 0):.0f}")
+            budget_table.add_row("Accommodation", f"${(budget.get('accommodation') or 0):.0f}")
         if budget.get("food"):
-            budget_table.add_row("Food", f"${budget.get('food', 0):.0f}")
+            budget_table.add_row("Food", f"${(budget.get('food') or 0):.0f}")
         if budget.get("activities"):
-            budget_table.add_row("Activities", f"${budget.get('activities', 0):.0f}")
+            budget_table.add_row("Activities", f"${(budget.get('activities') or 0):.0f}")
         if budget.get("miscellaneous"):
-            budget_table.add_row("Miscellaneous", f"${budget.get('miscellaneous', 0):.0f}")
-        budget_table.add_row("[bold]Total[/bold]", f"[bold]${budget.get('total', 0):.0f}[/bold]")
+            budget_table.add_row("Miscellaneous", f"${(budget.get('miscellaneous') or 0):.0f}")
+        budget_table.add_row("[bold]Total[/bold]", f"[bold]${(budget.get('total') or 0):.0f}[/bold]")
 
         console.print(budget_table)
         console.print()
